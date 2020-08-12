@@ -24,6 +24,44 @@ import debconf
 import install_misc
 
 # sys.path.insert(0, '/usr/lib/ubiquity')
+def query_recorded_installed():
+    apt_installed = set()
+    if os.path.exists("/var/lib/ubiquity/apt-installed"):
+        with open("/var/lib/ubiquity/apt-installed") as record_file:
+            for line in record_file:
+                apt_installed.add(line.strip())
+    return apt_installed
+
+
+class InstallStepError(Exception):
+    """Raised when an install step fails."""
+
+    def __init__(self, message):
+        Exception.__init__(self, message)
+
+# TODO this can probably go away now.
+def get_cache_pkg(cache, pkg):
+    # work around broken has_key in python-apt 0.6.16
+    try:
+        return cache[pkg]
+    except KeyError:
+        return None
+
+def broken_packages(cache):
+    expect_count = cache._depcache.broken_count
+    count = 0
+    brokenpkgs = set()
+    for pkg in cache.keys():
+        try:
+            if cache._depcache.is_inst_broken(cache._cache[pkg]):
+                brokenpkgs.add(pkg)
+                count += 1
+        except KeyError:
+            # Apparently sometimes the cache goes a bit bonkers ...
+            continue
+        if count >= expect_count:
+            break
+    return brokenpkgs
 
 class Install():
     def __init__(self):
@@ -89,50 +127,41 @@ class Install():
                 for pkg in to_install:
                     mark_install(cache, pkg)
 
+            return # it throw exception in mark_install
 
-            chroot_setup(self.target)
-            commit_error = None
-            try:
-                try:
-                    if not self.commit_with_verify(
-                            cache, fetchprogress, installprogress):
-                        fetchprogress.stop()
-                        installprogress.finish_update()
-                        self.db.progress('STOP')
-                        self.nested_progress_end()
-                        return
-                except IOError:
-                    for line in traceback.format_exc().split('\n'):
-                        syslog.syslog(syslog.LOG_ERR, line)
-                    fetchprogress.stop()
-                    installprogress.finish_update()
-                    self.db.progress('STOP')
-                    self.nested_progress_end()
-                    return
-                except SystemError as e:
-                    for line in traceback.format_exc().split('\n'):
-                        syslog.syslog(syslog.LOG_ERR, line)
-                    commit_error = str(e)
-            finally:
-                chroot_cleanup(self.target)
-            self.db.progress('SET', 10)
+def mark_install(cache, pkg):
+    cachedpkg = get_cache_pkg(cache, pkg)
+    if cachedpkg is None:
+        return
+    if not cachedpkg.is_installed or cachedpkg.is_upgradable:
+        apt_error = False
+        try:
+            cachedpkg.mark_install()
+        except SystemError:
+            apt_error = True
+        if cache._depcache.broken_count > 0 or apt_error:
+            brokenpkgs = broken_packages(cache)
+            while brokenpkgs:
+                for brokenpkg in brokenpkgs:
+                    get_cache_pkg(cache, brokenpkg).mark_keep()
+                new_brokenpkgs = broken_packages(cache)
+                if brokenpkgs == new_brokenpkgs:
+                    break  # we can do nothing more
+                brokenpkgs = new_brokenpkgs
 
-            cache.open(None)
-            if commit_error or cache._depcache.broken_count > 0:
-                if commit_error is None:
-                    commit_error = ''
-                brokenpkgs = broken_packages(cache)
-                self.warn_broken_packages(brokenpkgs, commit_error)
-
-            self.db.progress('STOP')
-
-            self.nested_progress_end()
+            if cache._depcache.broken_count > 0:
+                # We have a conflict we couldn't solve
+                cache.clear()
+                raise InstallStepError(
+                    "Unable to install '%s' due to conflicts." % pkg)
+    else:
+        cachedpkg.mark_auto(False)
 
 
 if __name__ == '__main__':
     os.environ['DPKG_UNTRANSLATED_MESSAGES'] = '1'
-    if not os.path.exists('/tmp/ubiquity'):
-        os.makedirs('/tmp/ubiquity')
+    if not os.path.exists('/var/lib/ubiquity'):
+        os.makedirs('/var/lib/ubiquity')
 
     install = Install()
     # sys.excepthook = install_misc.excepthook
