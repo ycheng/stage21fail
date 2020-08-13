@@ -21,7 +21,6 @@ import apt_pkg
 from apt.cache import Cache, FetchFailedException
 import debconf
 
-import install_misc
 
 # sys.path.insert(0, '/usr/lib/ubiquity')
 def query_recorded_installed():
@@ -89,7 +88,7 @@ class Install():
         # because this function runs before i386 foreign arch is
         # enabled
         cache = Cache()
-        filtered_extra_packages = install_misc.query_recorded_installed()
+        filtered_extra_packages = query_recorded_installed()
         for package in filtered_extra_packages.copy():
             pkg = cache.get(package)
             if not pkg:
@@ -137,8 +136,12 @@ def mark_install(cache, pkg):
         apt_error = False
         try:
             cachedpkg.mark_install()
-        except SystemError:
+        except SystemError as err:
+            print("=== apt_error")
+            print(err)
             apt_error = True
+        print(pkg)
+        # print("os.exit()")
         if cache._depcache.broken_count > 0 or apt_error:
             brokenpkgs = broken_packages(cache)
             while brokenpkgs:
